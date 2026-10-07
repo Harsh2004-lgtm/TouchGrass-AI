@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.local
+backend/node_modules/
+backend/.env
+backend/touchgrass.db
+backend/touchgrass.db-shm
+backend/touchgrass.db-wal
