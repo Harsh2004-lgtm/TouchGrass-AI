@@ -5,21 +5,61 @@ const db = require("./database");
 
 const app = express();
 
-app.use(cors());
+// --------------------------------------------------
+// Middleware
+// --------------------------------------------------
+
+const frontendUrl = process.env.FRONTEND_URL;
+
+app.use(
+  cors(
+    frontendUrl
+      ? {
+          origin: frontendUrl,
+        }
+      : {}
+  )
+);
+
 app.use(express.json());
+
+// --------------------------------------------------
+// Health
+// --------------------------------------------------
 
 app.get("/", (req, res) => {
   res.json({
+    success: true,
     message: "TouchGrass AI backend is running! 🌿",
   });
 });
 
+// Check AI configuration
+app.get("/api/health/ai", (req, res) => {
+  res.json({
+    success: true,
+    hfConfigured: Boolean(process.env.HF_TOKEN),
+    model:
+      process.env.HF_MODEL ||
+      "google/gemma-2-2b-it",
+  });
+});
+
+// --------------------------------------------------
 // Generate AI Mission
+// --------------------------------------------------
+
 app.post("/api/mission", async (req, res) => {
   const { time, activity } = req.body;
 
-  try {
-    const prompt = `
+  if (!time || !activity) {
+    return res.status(400).json({
+      success: false,
+      message: "Time aur activity required hai.",
+    });
+  }
+
+  const prompt = `
 You are TouchGrass AI, an outdoor activity planner.
 
 Create a safe and fun outdoor mission for a person.
@@ -34,22 +74,78 @@ Rules:
 - Encourage less phone usage.
 - Do not suggest dangerous activities.
 - Keep the response short and motivating.
-
-Return only the mission, no extra explanation.
+- Return only the mission.
 `;
 
-    const response = await axios.post(
-      "http://localhost:11434/api/generate",
-      {
-        model: "gemma:2b",
-        prompt: prompt,
-        stream: false,
-      }
-    );
+  try {
+    let missionText = "";
 
-    const missionText = response.data.response;
+    // ----------------------------------------------
+    // Production: Hugging Face
+    // ----------------------------------------------
 
-    // Save mission in SQLite
+    if (process.env.HF_TOKEN) {
+      const model =
+        process.env.HF_MODEL ||
+        "google/gemma-2-2b-it";
+
+      const response = await axios.post(
+        "https://router.huggingface.co/v1/chat/completions",
+        {
+          model: model,
+          messages: [
+            {
+              role: "user",
+              content: prompt,
+            },
+          ],
+          max_tokens: 300,
+          temperature: 0.7,
+          stream: false,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.HF_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          timeout: 60000,
+        }
+      );
+
+      missionText =
+        response.data?.choices?.[0]?.message?.content?.trim() ||
+        "";
+    }
+
+    // ----------------------------------------------
+    // Local development: Ollama fallback
+    // ----------------------------------------------
+
+    else {
+      const response = await axios.post(
+        "http://localhost:11434/api/generate",
+        {
+          model: "gemma:2b",
+          prompt: prompt,
+          stream: false,
+        },
+        {
+          timeout: 60000,
+        }
+      );
+
+      missionText =
+        response.data?.response?.trim() || "";
+    }
+
+    if (!missionText) {
+      throw new Error("AI returned an empty mission.");
+    }
+
+    // ----------------------------------------------
+    // Save mission to SQLite
+    // ----------------------------------------------
+
     const result = db
       .prepare(`
         INSERT INTO missions (
@@ -60,27 +156,51 @@ Return only the mission, no extra explanation.
         )
         VALUES (?, ?, ?, ?)
       `)
-      .run(activity, time, missionText, "generated");
+      .run(
+        activity,
+        time,
+        missionText,
+        "generated"
+      );
 
-    res.json({
+    return res.json({
       success: true,
       missionId: result.lastInsertRowid,
       mission: missionText,
     });
   } catch (error) {
-    console.error(
-      "Ollama/Database Error:",
-      error.message
-    );
+    console.error("AI/Database Error:", {
+      status: error.response?.status || null,
+      data: error.response?.data || null,
+      message: error.message,
+    });
 
-    res.status(500).json({
+    if (error.response) {
+      return res.status(502).json({
+        success: false,
+        message:
+          "Hugging Face AI service se response nahi aa raha.",
+        providerStatus: error.response.status,
+        providerError:
+          error.response.data?.error?.message ||
+          error.response.data?.error ||
+          error.response.data?.message ||
+          "Unknown provider error",
+      });
+    }
+
+    return res.status(500).json({
       success: false,
-      message: "AI ya database se response nahi aa raha.",
+      message:
+        "AI ya database se response nahi aa raha.",
     });
   }
 });
 
+// --------------------------------------------------
 // Mark mission as completed
+// --------------------------------------------------
+
 app.patch("/api/mission/:id/complete", (req, res) => {
   try {
     const missionId = req.params.id;
@@ -101,7 +221,7 @@ app.patch("/api/mission/:id/complete", (req, res) => {
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
       message: "Mission completed! 🎉",
     });
@@ -111,14 +231,17 @@ app.patch("/api/mission/:id/complete", (req, res) => {
       error.message
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Mission update nahi ho paayi.",
     });
   }
 });
 
-// Get mission history
+// --------------------------------------------------
+// Mission History
+// --------------------------------------------------
+
 app.get("/api/missions", (req, res) => {
   try {
     const missions = db
@@ -129,7 +252,7 @@ app.get("/api/missions", (req, res) => {
       `)
       .all();
 
-    res.json({
+    return res.json({
       success: true,
       missions,
     });
@@ -139,17 +262,19 @@ app.get("/api/missions", (req, res) => {
       error.message
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Mission history nahi mil paayi.",
     });
   }
 });
 
-// Get user progress
+// --------------------------------------------------
+// Progress
+// --------------------------------------------------
+
 app.get("/api/progress", (req, res) => {
   try {
-    // Basic progress stats
     const stats = db
       .prepare(`
         SELECT
@@ -178,12 +303,13 @@ app.get("/api/progress", (req, res) => {
       `)
       .get();
 
-    // Get unique days on which at least
-    // one mission was completed
     const completedDays = db
       .prepare(`
         SELECT DISTINCT
-          date(completed_at, '+05:30') AS completion_date
+          date(
+            completed_at,
+            '+05:30'
+          ) AS completion_date
         FROM missions
         WHERE status = 'completed'
           AND completed_at IS NOT NULL
@@ -191,24 +317,23 @@ app.get("/api/progress", (req, res) => {
       `)
       .all();
 
-    // Calculate current streak
     let currentStreak = 0;
 
     if (completedDays.length > 0) {
-      const today = new Date();
-
       const todayString =
-        today.getFullYear() +
-        "-" +
-        String(today.getMonth() + 1).padStart(2, "0") +
-        "-" +
-        String(today.getDate()).padStart(2, "0");
+        new Intl.DateTimeFormat(
+          "en-CA",
+          {
+            timeZone: "Asia/Kolkata",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          }
+        ).format(new Date());
 
       const latestDate =
         completedDays[0].completion_date;
 
-      // Streak is active only when
-      // today's mission has been completed
       if (latestDate === todayString) {
         currentStreak = 1;
 
@@ -218,11 +343,11 @@ app.get("/api/progress", (req, res) => {
           i++
         ) {
           const previous = new Date(
-            completedDays[i - 1].completion_date
+            `${completedDays[i - 1].completion_date}T00:00:00Z`
           );
 
           const current = new Date(
-            completedDays[i].completion_date
+            `${completedDays[i].completion_date}T00:00:00Z`
           );
 
           const difference =
@@ -238,25 +363,33 @@ app.get("/api/progress", (req, res) => {
       }
     }
 
-    // Completion percentage
+    const totalMissions =
+      Number(stats.total_missions) || 0;
+
+    const completedMissions =
+      Number(stats.completed_missions) || 0;
+
+    const totalOutdoorMinutes =
+      Number(
+        stats.total_outdoor_minutes
+      ) || 0;
+
     const completionRate =
-      stats.total_missions > 0
+      totalMissions > 0
         ? Math.round(
-            (stats.completed_missions /
-              stats.total_missions) *
+            (completedMissions /
+              totalMissions) *
               100
           )
         : 0;
 
-    res.json({
+    return res.json({
       success: true,
 
       progress: {
-        totalMissions: stats.total_missions,
-        completedMissions:
-          stats.completed_missions,
-        totalOutdoorMinutes:
-          stats.total_outdoor_minutes,
+        totalMissions,
+        completedMissions,
+        totalOutdoorMinutes,
         completionRate,
         currentStreak,
       },
@@ -267,18 +400,22 @@ app.get("/api/progress", (req, res) => {
       error.message
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Progress data nahi mil paaya.",
     });
   }
 });
 
+// --------------------------------------------------
 // Server
-const PORT = 5000;
+// --------------------------------------------------
 
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 5000;
+const HOST = "0.0.0.0";
+
+app.listen(PORT, HOST, () => {
   console.log(
-    `Server running on http://localhost:${PORT}`
+    `Server running on ${HOST}:${PORT}`
   );
 });
