@@ -154,7 +154,7 @@ function App() {
 
 
 
-        "http://localhost:5000/api/missions"
+        "https://touchgrass-ai-zqxa.onrender.com/api/missions"
 
 
 
@@ -222,7 +222,7 @@ function App() {
 
 
 
-        "http://localhost:5000/api/progress"
+        "https://touchgrass-ai-zqxa.onrender.com/api/progress"
 
 
 
@@ -398,7 +398,7 @@ function App() {
 
 
 
-          `http://localhost:5000/api/mission/${missionId}/complete`,
+          `https://touchgrass-ai-zqxa.onrender.com/api/mission/${missionId}/complete`,
 
 
 
@@ -622,7 +622,7 @@ function App() {
 
 
 
-        "http://localhost:5000/api/mission",
+        "https://touchgrass-ai-zqxa.onrender.com/api/mission",
 
 
 
